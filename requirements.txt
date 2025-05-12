@@ -1,3 +1,5 @@
+keyboard
 opencv-python
 numpy
-scipy 
+mss
+Pillow 

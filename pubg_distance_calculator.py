@@ -18,7 +18,7 @@ osd_dismiss_key_handler = None # For the keyboard.on_press handler
 # --- Global Processing Indicator Variables ---
 indicator_window = None
 indicator_dismiss_key_handler = None # For dismissing the indicator window
-processing_border_top_bottom = 100 # For top and bottom borders
+processing_border_top_bottom = 0 # For top and bottom borders
 processing_border_left_right = 300 # For left and right borders (YOU CAN CHANGE THIS VALUE)
 
 # --- Debug Offset Variables for Player/Ping --- 
