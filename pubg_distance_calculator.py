@@ -17,6 +17,7 @@ osd_dismiss_key_handler = None # For the keyboard.on_press handler
 
 # --- Global Processing Indicator Variables ---
 indicator_window = None
+indicator_dismiss_key_handler = None # For dismissing the indicator window
 processing_border_top_bottom = 100 # For top and bottom borders
 processing_border_left_right = 300 # For left and right borders (YOU CAN CHANGE THIS VALUE)
 
@@ -144,47 +145,88 @@ def setup_indicator_window():
     indicator_window.withdraw() # Start hidden
     indicator_window.overrideredirect(True)
     indicator_window.wm_attributes("-topmost", True)
-    indicator_window.attributes('-alpha', 0.4) # Semi-transparent background for the whole window
+    indicator_window.attributes('-alpha', 0.4) 
 
     screen_width = indicator_window.winfo_screenwidth()
     screen_height = indicator_window.winfo_screenheight()
     indicator_window.geometry(f"{screen_width}x{screen_height}+0+0")
-    indicator_window.config(bg="black") # This black will be semi-transparent (due to alpha)
+    indicator_window.config(bg="black") 
 
+    # Canvas will be the direct child, used for all drawings
     canvas = tk.Canvas(indicator_window, width=screen_width, height=screen_height,
-                       bg="black", # Match window bg, it will also be semi-transparent
+                       bg="black", 
                        highlightthickness=0)
     canvas.pack()
+    print("Indicator Setup: Processing indicator window configured with a canvas.")
 
-    # Draw the frame for the *processed* area
-    canvas.create_rectangle(
-        processing_border_left_right, # Use specific left/right border
-        processing_border_top_bottom, # Use specific top/bottom border
-        screen_width - processing_border_left_right, # Adjust for right border
-        screen_height - processing_border_top_bottom, # Adjust for bottom border
-        outline="lime", 
-        width=3  # Outline width
-    )
-
-    canvas.create_text(
-        screen_width / 2,
-        screen_height / 2,
-        text="Processing...",
-        font=("Arial", 45, "bold"),
-        fill="white" 
-    )
-    print("Indicator Setup: Processing indicator window configured.")
-
-def show_indicator_window_sync():
+def show_indicator_window_sync(enable_dismiss_hook=False):
+    global indicator_window, indicator_dismiss_key_handler, osd_root
     if indicator_window:
         indicator_window.deiconify()
         indicator_window.lift()
-        indicator_window.update_idletasks() # Try to force update
+        indicator_window.update_idletasks() 
+
+        if enable_dismiss_hook:
+            # Unhook any previously active dismiss listener immediately
+            if indicator_dismiss_key_handler:
+                try:
+                    print("Indicator Show: Unhooking previous 'any key' indicator dismiss listener.")
+                    keyboard.unhook(indicator_dismiss_key_handler)
+                except Exception as e:
+                    print(f"Indicator Show: Error unhooking previous dismiss listener: {e}")
+                indicator_dismiss_key_handler = None # Clear it regardless
+            
+            def on_any_key_for_indicator_dismiss(event):
+                # This callback should ideally also check if the indicator is still supposed to be active
+                # but hide_indicator_window_sync handles the unhooking robustly.
+                print(f"Indicator Dismiss (keyboard lib): Key '{event.name}' pressed. Hiding indicator.")
+                hide_indicator_window_sync()
+
+            def register_dismiss_hook_after_delay():
+                global indicator_dismiss_key_handler # Ensure we modify the global handler
+                # Double check if another hook was set up by a rapid subsequent call, though unlikely here
+                if indicator_dismiss_key_handler is not None:
+                    try: keyboard.unhook(indicator_dismiss_key_handler) # Precaution
+                    except: pass
+                
+                indicator_dismiss_key_handler = keyboard.on_press(on_any_key_for_indicator_dismiss, suppress=False)
+                print("Indicator Show: Registered 'any key' listener for indicator dismissal (after delay).")
+
+            # Schedule the registration of the new dismiss hook after a short delay
+            if osd_root: # Check if osd_root is available for Tkinter's .after method
+                print("Indicator Show: Scheduling registration of 'any key' listener via osd_root.after().")
+                osd_root.after(150, register_dismiss_hook_after_delay) # 150ms delay
+            else:
+                # Fallback if osd_root is not set - unlikely in current flow but good for robustness
+                print("Indicator Show: osd_root not found, using time.sleep() before registering listener.")
+                time.sleep(0.15) # 150ms delay
+                register_dismiss_hook_after_delay()
+            
+            # print("Indicator Show: Registered 'any key' listener for indicator dismissal.") # This print moves
+        else: # If enable_dismiss_hook is False, ensure no old hook lingers
+            if indicator_dismiss_key_handler:
+                try:
+                    print("Indicator Show: (enable_dismiss_hook=False) Unhooking previous dismiss listener.")
+                    keyboard.unhook(indicator_dismiss_key_handler)
+                except Exception as e:
+                    print(f"Indicator Show: Error unhooking (enable_dismiss_hook=False): {e}")
+                indicator_dismiss_key_handler = None
 
 def hide_indicator_window_sync():
+    global indicator_window, indicator_dismiss_key_handler
     if indicator_window:
         indicator_window.withdraw()
-        indicator_window.update_idletasks() # Process hide event
+        indicator_window.update_idletasks()
+
+    if indicator_dismiss_key_handler:
+        try:
+            print("Indicator Hide: Unhooking 'any key' indicator dismiss listener.")
+            keyboard.unhook(indicator_dismiss_key_handler)
+        except Exception as e:
+            print(f"Indicator Hide: Error unhooking listener: {e}")
+        finally:
+            indicator_dismiss_key_handler = None
+            print("Indicator Hide: Listener unhooked.")
 
 # --- Core Image Processing Functions (Re-integrated, no cv2.imshow) ---
 def load_image(image_path):
@@ -318,35 +360,28 @@ def detect_grid_lines_via_local_patterns_and_calculate_scale(map_image_cv, brigh
     """
     Detects grid lines by looking for local 4x4 horizontal/vertical line patterns,
     reconstructs lines, and calculates the pixel-to-meter scale.
-    This version is adapted from test.py for use in the main script (no cv2.imshow).
+    Returns a dictionary with 'scale', 'h_lines', 'v_lines', 'pixels_100m' or None.
     """
     if map_image_cv is None:
         print("Scale Error: Map image missing for pattern-based line detection.")
         return None
 
     gray_map = cv2.cvtColor(map_image_cv, cv2.COLOR_BGR2GRAY)
-    # No cv2.imshow here
 
     horizontal_pattern_windows = [] 
     vertical_pattern_windows = []   
     
-    # Use the passed brightness_delta_param instead of a hardcoded value
-    # brightness_delta = 5 # This was from test.py, now using param
     height, width = gray_map.shape
 
     for y_scan in range(height - 3): 
         for x_scan in range(width - 3):  
             window = gray_map[y_scan:y_scan+4, x_scan:x_scan+4]
-            
             if check_horizontal_line_pattern_4x4(window, brightness_delta_param):
                 horizontal_pattern_windows.append((x_scan, y_scan))
-
             if check_vertical_line_pattern_4x4(window, brightness_delta_param):
                 vertical_pattern_windows.append((x_scan, y_scan))
 
     print(f"Scale Info: Found {len(horizontal_pattern_windows)} H-pattern windows, {len(vertical_pattern_windows)} V-pattern windows.")
-
-    # No visualization of pattern hits (cv2.imshow removed)
 
     reconstructed_h_lines = []
     reconstructed_v_lines = []
@@ -365,12 +400,13 @@ def detect_grid_lines_via_local_patterns_and_calculate_scale(map_image_cv, brigh
                 if visited_h[j]: continue
                 if abs(sorted_h_windows[j][1] - base_y_for_group) <= y_cluster_tolerance:
                     current_y_group_windows.append(sorted_h_windows[j]); visited_h[j] = True
-            if len(current_y_group_windows) >= min_points_for_line_thr: # Use passed parameter
+            if len(current_y_group_windows) >= min_points_for_line_thr: 
                 avg_line_y = int(round(np.mean([p[1] for p in current_y_group_windows]) + 1.5))
                 min_x_coord = min([p[0] for p in current_y_group_windows])
                 max_x_coord = max([p[0] + 3 for p in current_y_group_windows])
                 if max_x_coord > min_x_coord: 
-                    reconstructed_h_lines.append((min_x_coord, avg_line_y, max_x_coord, avg_line_y))
+                    line_coords = (min_x_coord, avg_line_y, max_x_coord, avg_line_y)
+                    reconstructed_h_lines.append(line_coords)
 
     if vertical_pattern_windows:
         sorted_v_windows = sorted(vertical_pattern_windows, key=lambda p: p[0])
@@ -383,21 +419,22 @@ def detect_grid_lines_via_local_patterns_and_calculate_scale(map_image_cv, brigh
                 if visited_v[j]: continue
                 if abs(sorted_v_windows[j][0] - base_x_for_group) <= x_cluster_tolerance:
                     current_x_group_windows.append(sorted_v_windows[j]); visited_v[j] = True
-            if len(current_x_group_windows) >= min_points_for_line_thr: # Use passed parameter
+            if len(current_x_group_windows) >= min_points_for_line_thr: 
                 avg_line_x = int(round(np.mean([p[0] for p in current_x_group_windows]) + 1.5))
                 min_y_coord = min([p[1] for p in current_x_group_windows])
                 max_y_coord = max([p[1] + 3 for p in current_x_group_windows])
                 if max_y_coord > min_y_coord:
-                    reconstructed_v_lines.append((avg_line_x, min_y_coord, avg_line_x, max_y_coord))
+                    line_coords = (avg_line_x, min_y_coord, avg_line_x, max_y_coord)
+                    reconstructed_v_lines.append(line_coords)
 
-    # No visualization of reconstructed lines (cv2.imshow removed)
     if reconstructed_h_lines: print(f"Scale Info: Reconstructed {len(reconstructed_h_lines)} H-lines (New Patterns).")
     if reconstructed_v_lines: print(f"Scale Info: Reconstructed {len(reconstructed_v_lines)} V-lines (New Patterns).")
+    
     if not reconstructed_h_lines and not reconstructed_v_lines:
         print("Scale Error: Could not reconstruct significant H or V lines (New Patterns).")
-        return None # Added return based on previous logic if no lines
+        return None
 
-    pixels_per_100m = 0
+    pixels_per_100m_calc = 0
     min_expected_spacing = 30 
     max_expected_spacing = 300 
     min_samples_for_median = 2 
@@ -442,17 +479,21 @@ def detect_grid_lines_via_local_patterns_and_calculate_scale(map_image_cv, brigh
         total_spacing_sum += robust_avg_v_spacing; valid_spacings_found += 1
 
     if valid_spacings_found > 0:
-        pixels_per_100m = total_spacing_sum / valid_spacings_found
-        print(f"Scale Info: Calculated average pixels_per_100m (New Patterns): {pixels_per_100m:.2f}")
+        pixels_per_100m_calc = total_spacing_sum / valid_spacings_found
+        print(f"Scale Info: Calculated average pixels_per_100m (New Patterns): {pixels_per_100m_calc:.2f}")
     else:
         print("Scale Error: No robust H or V spacings found (New Patterns), cannot calculate overall scale.")
-        pixels_per_100m = 0 
+        return None 
     
-    if pixels_per_100m > 0:
-        scale_meters_per_pixel = 100.0 / pixels_per_100m
+    if pixels_per_100m_calc > 0:
+        scale_meters_per_pixel = 100.0 / pixels_per_100m_calc
         print(f"Scale Info: Final calculated scale (New Patterns): {scale_meters_per_pixel:.4f} meters/pixel")
-        # No verification image drawing (cv2.imshow removed)
-        return scale_meters_per_pixel
+        return {
+            'scale': scale_meters_per_pixel,
+            'h_lines': reconstructed_h_lines,
+            'v_lines': reconstructed_v_lines,
+            'pixels_100m': pixels_per_100m_calc
+        }
     else:
         print("Scale Error: Could not determine a valid pixels_per_100m scale (New Patterns).")
         return None
@@ -487,15 +528,28 @@ def on_hotkey_pressed():
     
     # --- Capture Screen FIRST ---
     print("HOTKEY: Capturing screen...")
-    screen_image = capture_screen() # Capture before showing any overlay
+    screen_image = capture_screen() 
 
     # --- Now show indicator if capture was successful ---
     if screen_image is not None and indicator_window:
-        print("HOTKEY: Showing processing indicator.")
-        show_indicator_window_sync()
+        canvas = indicator_window.winfo_children()[0] # Assuming canvas is the first/only child
+        canvas.delete("all")
+        
+        # Draw the frame for the *processed* area
+        screen_width = indicator_window.winfo_screenwidth()
+        screen_height = indicator_window.winfo_screenheight()
+        canvas.create_rectangle(
+            processing_border_left_right, processing_border_top_bottom,
+            screen_width - processing_border_left_right, screen_height - processing_border_top_bottom,
+            outline="lime", width=3
+        )
+        canvas.create_text(
+            screen_width / 2, screen_height / 2,
+            text="Processing...", font=("Arial", 45, "bold"), fill="white" 
+        )
+        print("HOTKEY: Showing processing indicator with default content.")
+        show_indicator_window_sync(enable_dismiss_hook=False) # No dismiss hook for processing message
     elif screen_image is None:
-        # If capture failed, we might not want to show the indicator,
-        # or we might show it briefly with an error. For now, skip if capture fails.
         print("HOTKEY: Screen capture failed, skipping indicator display.")
 
     print("HOTKEY: Processing screen analysis...")
@@ -504,12 +558,9 @@ def on_hotkey_pressed():
     final_osd_message = ""
     screen_image_to_process = None
 
-    # 1. Capture screen
-    screen_image = capture_screen()
     if screen_image is None:
         final_osd_message = "Error: Screen capture failed."
     else:
-        # Crop the image for processing
         h, w = screen_image.shape[:2]
         roi_x1 = processing_border_left_right
         roi_y1 = processing_border_top_bottom
@@ -525,14 +576,16 @@ def on_hotkey_pressed():
             new_dims = screen_image_to_process.shape
             print(f"HOTKEY: Cropped image for processing from ({roi_x1},{roi_y1})-({roi_x2},{roi_y2}). New dims: {new_dims[:2]}")
 
-    # Proceed with processing only if screen_image_to_process is valid
     if screen_image_to_process is not None:
-        # 2. Calculate scale
-        scale = detect_grid_lines_via_local_patterns_and_calculate_scale(
+        scale_data = detect_grid_lines_via_local_patterns_and_calculate_scale(
             screen_image_to_process, 
             BRIGHTNESS_DELTA_GRID, 
             MIN_POINTS_FOR_LINE_GRID
         )
+        scale = None
+        if scale_data:
+            scale = scale_data['scale']
+        
         if scale is None:
             final_osd_message = "Error: Map scale not found."
         else:
@@ -558,14 +611,14 @@ def on_hotkey_pressed():
                 else:
                     # 5. Calculate distance string (Success case)
                     final_osd_message = get_distance_string(player_coords, ping_coords, scale)
-    elif not final_osd_message: # If capture was ok but crop failed and no message set yet
+    elif not final_osd_message: 
         final_osd_message = "Error: Image cropping failed."
             
     end_time = time.time()
     processing_time = end_time - start_time
     print(f"HOTKEY: Analysis function complete ({processing_time:.2f}s). Message: '{final_osd_message}'. Scheduling OSD update.")
 
-    if indicator_window:
+    if indicator_window and indicator_window.winfo_viewable() : # Check if it was shown
         print("HOTKEY: Hiding processing indicator.")
         hide_indicator_window_sync()
 
@@ -575,6 +628,127 @@ def on_hotkey_pressed():
         print("HOTKEY: OSD update scheduled via osd_root.after().")
     else:
         print("HOTKEY: OSD root window not available. Cannot schedule OSD update.")
+
+# --- Debug Hotkey Function ---
+def on_debug_hotkey_pressed():
+    print(f"DEBUG HOTKEY: Ctrl+Shift+Alt+K detected. Timestamp: {time.time():.2f}")
+    
+    print("DEBUG HOTKEY: Capturing screen...")
+    screen_image = capture_screen()
+    if screen_image is None:
+        print("DEBUG HOTKEY: Screen capture failed.")
+        try: tkinter.messagebox.showerror("Debug Capture Error", "Screen capture failed for debug.")
+        except tk.TclError: pass 
+        return
+
+    # --- Show "Processing..." indicator FIRST --- 
+    if indicator_window:
+        canvas = indicator_window.winfo_children()[0]
+        canvas.delete("all")
+        screen_width_indicator = indicator_window.winfo_screenwidth()
+        screen_height_indicator = indicator_window.winfo_screenheight()
+        canvas.create_rectangle(
+            processing_border_left_right, processing_border_top_bottom,
+            screen_width_indicator - processing_border_left_right, screen_height_indicator - processing_border_top_bottom,
+            outline="lime", width=3, tags="processing_border"
+        )
+        canvas.create_text(
+            screen_width_indicator / 2, screen_height_indicator / 2,
+            text="Processing...", font=("Arial", 45, "bold"), fill="white", tags="processing_text"
+        )
+        print("DEBUG HOTKEY: Showing 'Processing...' indicator.")
+        show_indicator_window_sync(enable_dismiss_hook=False) # No dismiss for this stage
+
+    # --- Now crop and analyze ---
+    h, w = screen_image.shape[:2]
+    roi_x1 = processing_border_left_right
+    roi_y1 = processing_border_top_bottom
+    roi_x2 = w - processing_border_left_right
+    roi_y2 = h - processing_border_top_bottom
+
+    screen_image_to_process = None
+    if roi_x1 >= roi_x2 or roi_y1 >= roi_y2:
+        error_detail = f"Screen: {w}x{h}, Borders T/B: {processing_border_top_bottom}, L/R: {processing_border_left_right}"
+        err_msg = f"Error: Processing border too large for debug. ({error_detail})"
+        print(f"DEBUG HOTKEY: Crop Error - {err_msg}")
+        try: tkinter.messagebox.showerror("Debug Crop Error", err_msg)
+        except tk.TclError: pass
+        return
+    else:
+        screen_image_to_process = screen_image[roi_y1:roi_y2, roi_x1:roi_x2]
+        print(f"DEBUG HOTKEY: Cropped image. Dims: {screen_image_to_process.shape[:2]}")
+
+    print("DEBUG HOTKEY: Detecting grid lines and scale...")
+    scale_analysis_data = detect_grid_lines_via_local_patterns_and_calculate_scale(
+        screen_image_to_process,
+        BRIGHTNESS_DELTA_GRID,
+        MIN_POINTS_FOR_LINE_GRID
+    )
+
+    if indicator_window:
+        canvas = indicator_window.winfo_children()[0] # Assuming canvas is first child
+        canvas.delete("all") # Clear previous drawings
+
+        # Draw processing area border
+        screen_width_indicator = indicator_window.winfo_screenwidth()
+        screen_height_indicator = indicator_window.winfo_screenheight()
+        canvas.create_rectangle(
+            processing_border_left_right, processing_border_top_bottom,
+            screen_width_indicator - processing_border_left_right, screen_height_indicator - processing_border_top_bottom,
+            outline="lime", width=3, tags="debug_border"
+        )
+        
+        debug_message = "Debug View - Press any key to close"
+        if scale_analysis_data:
+            print(f"DEBUG HOTKEY: Scale data found. Scale: {scale_analysis_data.get('scale', 'N/A')}")
+            # Draw H-Lines
+            for x1, y1, x2, y2 in scale_analysis_data.get('h_lines', []):
+                canvas.create_line(
+                    x1 + processing_border_left_right, y1 + processing_border_top_bottom,
+                    x2 + processing_border_left_right, y2 + processing_border_top_bottom,
+                    fill="green", width=2, tags="debug_line"
+                )
+            # Draw V-Lines
+            for x1, y1, x2, y2 in scale_analysis_data.get('v_lines', []):
+                canvas.create_line(
+                    x1 + processing_border_left_right, y1 + processing_border_top_bottom,
+                    x2 + processing_border_left_right, y2 + processing_border_top_bottom,
+                    fill="cyan", width=2, tags="debug_line"
+                )
+            # Draw Scale Reference
+            pixels_100m = scale_analysis_data.get('pixels_100m')
+            if pixels_100m and pixels_100m > 0:
+                ref_start_x_canvas = processing_border_left_right + int(screen_image_to_process.shape[1] * 0.05)
+                ref_start_y_canvas = processing_border_top_bottom + int(screen_image_to_process.shape[0] * 0.05)
+                ref_end_x_h_canvas = ref_start_x_canvas + int(round(pixels_100m))
+                ref_end_y_v_canvas = ref_start_y_canvas + int(round(pixels_100m))
+                
+                canvas.create_line(ref_start_x_canvas, ref_start_y_canvas, ref_end_x_h_canvas, ref_start_y_canvas, 
+                                   fill="yellow", width=2, tags="debug_scale_ref")
+                canvas.create_line(ref_start_x_canvas, ref_start_y_canvas, ref_start_x_canvas, ref_end_y_v_canvas, 
+                                   fill="yellow", width=2, tags="debug_scale_ref")
+                canvas.create_text(ref_start_x_canvas + 5, ref_start_y_canvas - 10, 
+                                   text=f"100m ({pixels_100m:.0f}px)", fill="yellow", anchor="nw", 
+                                   font=("Arial", 12, "bold"), tags="debug_scale_text")
+            debug_message += f" | Scale: {scale_analysis_data.get('scale', 0):.2f} m/px"
+        else:
+            print("DEBUG HOTKEY: Failed to get scale data for drawing.")
+            debug_message += " | Scale data not found."
+
+        canvas.create_text(
+            screen_width_indicator / 2, screen_height_indicator / 2,
+            text=debug_message, font=("Arial", 20, "bold"), fill="white", tags="debug_text"
+        )
+        show_indicator_window_sync(enable_dismiss_hook=True)
+    else:
+        print("DEBUG HOTKEY: Indicator window not available to draw debug info.")
+        if scale_analysis_data:
+             tkinter.messagebox.showinfo("Debug Info (No Overlay)", f"Scale: {scale_analysis_data.get('scale', 'N/A')}. Check console for line data.")
+        else:
+             tkinter.messagebox.showinfo("Debug Info (No Overlay)", "Debug analysis ran, but indicator window not found. Check console.")
+
+
+    print("DEBUG HOTKEY: Processing complete.")
 
 # --- Main Program Setup ---
 if __name__ == "__main__":
@@ -607,6 +781,13 @@ if __name__ == "__main__":
         print(f"MAIN: Attempting to register hotkey '{HOTKEY_STRING}'...")
         keyboard.add_hotkey(HOTKEY_STRING, on_hotkey_pressed, suppress=False)
         print(f"MAIN: Hotkey '{HOTKEY_STRING}' registered successfully.")
+        
+        # Register Debug Hotkey
+        DEBUG_HOTKEY_STRING = "ctrl+shift+alt+k"
+        print(f"MAIN: Attempting to register debug hotkey '{DEBUG_HOTKEY_STRING}'...")
+        keyboard.add_hotkey(DEBUG_HOTKEY_STRING, on_debug_hotkey_pressed, suppress=False)
+        print(f"MAIN: Debug hotkey '{DEBUG_HOTKEY_STRING}' registered successfully.")
+
         print(f"Press {HOTKEY_STRING} to measure distance.")
         print("Press any key on the OSD to hide it.")
     except Exception as e:
@@ -639,9 +820,9 @@ if __name__ == "__main__":
             print("MAIN: Destroying OSD window...")
             osd_root.destroy() # This should also destroy child Toplevels like indicator_window
             print("MAIN: OSD window destroyed.")
-        # Explicitly destroy indicator window if it's not a child or for safety
         if indicator_window and indicator_window.winfo_exists():
              print("MAIN: Explicitly destroying indicator window...")
              indicator_window.destroy()
              print("MAIN: Indicator window destroyed.")
+        cv2.destroyAllWindows() # Ensure any OpenCV windows are closed
         print("Shutdown complete.")
