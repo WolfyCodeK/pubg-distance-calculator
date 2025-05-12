@@ -21,6 +21,12 @@ indicator_dismiss_key_handler = None # For dismissing the indicator window
 processing_border_top_bottom = 100 # For top and bottom borders
 processing_border_left_right = 300 # For left and right borders (YOU CAN CHANGE THIS VALUE)
 
+# --- Debug Offset Variables for Player/Ping --- 
+PLAYER_ICON_DEBUG_X_OFFSET = 0 # Adjust player icon marker in DEBUG VIEW ONLY
+PLAYER_ICON_DEBUG_Y_OFFSET = 0 # Adjust player icon marker in DEBUG VIEW ONLY
+PING_MARKER_DEBUG_X_OFFSET = 0 # Adjust ping marker in DEBUG VIEW ONLY
+PING_MARKER_DEBUG_Y_OFFSET = 8 # Adjust ping marker in DEBUG VIEW ONLY
+
 # --- Global Image Processing & Template Variables ---
 player_template_cv = None
 ping_template_cv = None
@@ -590,27 +596,41 @@ def on_hotkey_pressed():
             final_osd_message = "Error: Map scale not found."
         else:
             # 3. Detect Player Icon
-            player_coords = detect_object_template_matching(
+            player_coords_original = detect_object_template_matching(
                 screen_image_to_process, 
                 player_template_cv, 
                 "Player Icon", 
                 TEMPLATE_MATCHING_THRESHOLD_PLAYER
             )
-            if player_coords is None:
+            if player_coords_original is None:
                 final_osd_message = "Error: Player icon not found."
             else:
+                # Apply debug offsets for calculation
+                player_coords_for_calc = (
+                    player_coords_original[0] + PLAYER_ICON_DEBUG_X_OFFSET,
+                    player_coords_original[1] + PLAYER_ICON_DEBUG_Y_OFFSET
+                )
+                print(f"HOTKEY: Player Icon Original Coords: {player_coords_original}, For Calc (with offsets): {player_coords_for_calc}")
+                
                 # 4. Detect Ping Marker
-                ping_coords = detect_object_template_matching(
+                ping_coords_original = detect_object_template_matching(
                     screen_image_to_process, 
                     ping_template_cv, 
                     "Ping Marker", 
                     TEMPLATE_MATCHING_THRESHOLD_PING
                 )
-                if ping_coords is None:
+                if ping_coords_original is None:
                     final_osd_message = "Error: Ping marker not found."
                 else:
+                    # Apply debug offsets for calculation
+                    ping_coords_for_calc = (
+                        ping_coords_original[0] + PING_MARKER_DEBUG_X_OFFSET,
+                        ping_coords_original[1] + PING_MARKER_DEBUG_Y_OFFSET
+                    )
+                    print(f"HOTKEY: Ping Marker Original Coords: {ping_coords_original}, For Calc (with offsets): {ping_coords_for_calc}")
+                    
                     # 5. Calculate distance string (Success case)
-                    final_osd_message = get_distance_string(player_coords, ping_coords, scale)
+                    final_osd_message = get_distance_string(player_coords_for_calc, ping_coords_for_calc, scale)
     elif not final_osd_message: 
         final_osd_message = "Error: Image cropping failed."
             
@@ -685,8 +705,41 @@ def on_debug_hotkey_pressed():
         MIN_POINTS_FOR_LINE_GRID
     )
 
+    # --- Detect Player and Ping for Debug Visualization ---
+    player_coords_original = None
+    ping_coords_original = None
+    player_coords_debug_adjusted = None
+    ping_coords_debug_adjusted = None
+
+    if screen_image_to_process is not None:
+        print("DEBUG HOTKEY: Detecting player icon for debug view...")
+        player_coords_original = detect_object_template_matching(
+            screen_image_to_process, player_template_cv, "Player Icon (Debug)", TEMPLATE_MATCHING_THRESHOLD_PLAYER
+        )
+        if player_coords_original:
+            player_coords_debug_adjusted = (
+                player_coords_original[0] + PLAYER_ICON_DEBUG_X_OFFSET,
+                player_coords_original[1] + PLAYER_ICON_DEBUG_Y_OFFSET
+            )
+            print(f"DEBUG HOTKEY: Player Icon Original: {player_coords_original}, Adjusted for Debug: {player_coords_debug_adjusted}")
+        else:
+            print("DEBUG HOTKEY: Player Icon not found for debug view.")
+
+        print("DEBUG HOTKEY: Detecting ping marker for debug view...")
+        ping_coords_original = detect_object_template_matching(
+            screen_image_to_process, ping_template_cv, "Ping Marker (Debug)", TEMPLATE_MATCHING_THRESHOLD_PING
+        )
+        if ping_coords_original:
+            ping_coords_debug_adjusted = (
+                ping_coords_original[0] + PING_MARKER_DEBUG_X_OFFSET,
+                ping_coords_original[1] + PING_MARKER_DEBUG_Y_OFFSET
+            )
+            print(f"DEBUG HOTKEY: Ping Marker Original: {ping_coords_original}, Adjusted for Debug: {ping_coords_debug_adjusted}")
+        else:
+            print("DEBUG HOTKEY: Ping Marker not found for debug view.")
+
     if indicator_window:
-        canvas = indicator_window.winfo_children()[0] # Assuming canvas is first child
+        canvas = indicator_window.winfo_children()[0] 
         canvas.delete("all") # Clear previous drawings
 
         # Draw processing area border
@@ -734,6 +787,24 @@ def on_debug_hotkey_pressed():
         else:
             print("DEBUG HOTKEY: Failed to get scale data for drawing.")
             debug_message += " | Scale data not found."
+
+        # Draw Player Icon Marker (if found and adjusted)
+        if player_coords_debug_adjusted:
+            px_canvas = player_coords_debug_adjusted[0] + processing_border_left_right
+            py_canvas = player_coords_debug_adjusted[1] + processing_border_top_bottom
+            canvas.create_oval(px_canvas-3, py_canvas-3, px_canvas+3, py_canvas+3, 
+                               fill="magenta", outline="white", width=1, tags="debug_player_marker")
+            canvas.create_text(px_canvas, py_canvas - 10, text="Player", fill="magenta", 
+                               font=("Arial", 10, "bold"), anchor="s", tags="debug_player_text")
+
+        # Draw Ping Marker (if found and adjusted)
+        if ping_coords_debug_adjusted:
+            pgx_canvas = ping_coords_debug_adjusted[0] + processing_border_left_right
+            pgy_canvas = ping_coords_debug_adjusted[1] + processing_border_top_bottom
+            canvas.create_oval(pgx_canvas-3, pgy_canvas-3, pgx_canvas+3, pgy_canvas+3, 
+                               fill="orange", outline="white", width=1, tags="debug_ping_marker")
+            canvas.create_text(pgx_canvas, pgy_canvas - 10, text="Ping", fill="orange", 
+                               font=("Arial", 10, "bold"), anchor="s", tags="debug_ping_text")
 
         canvas.create_text(
             screen_width_indicator / 2, screen_height_indicator / 2,
