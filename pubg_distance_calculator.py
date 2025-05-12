@@ -15,6 +15,11 @@ osd_root = None
 osd_label = None
 osd_dismiss_key_handler = None # For the keyboard.on_press handler
 
+# --- Global Processing Indicator Variables ---
+indicator_window = None
+processing_border_top_bottom = 100 # For top and bottom borders
+processing_border_left_right = 300 # For left and right borders (YOU CAN CHANGE THIS VALUE)
+
 # --- Global Image Processing & Template Variables ---
 player_template_cv = None
 ping_template_cv = None
@@ -55,7 +60,7 @@ def setup_osd():
     osd_label = tk.Label(osd_root, text="", font=("Arial", 22, "bold"),
                          bg="black", fg="white", wraplength=600, justify="center")
     osd_label.pack(padx=15, pady=10)
-    print("OSD Setup: Tkinter <Any-KeyPress> binding REMOVED. Dismissal will be handled by 'keyboard' library.")
+    print("OSD Setup: Tkinter <Any-KeyPress> binding for OSD dismissal is NOT used (handled by 'keyboard' library).")
 
 def show_osd_message(message_to_display):
     global osd_root, osd_label, osd_dismiss_key_handler # Added osd_dismiss_key_handler
@@ -127,6 +132,59 @@ def hide_osd():
             print(f"OSD Hide: Error unhooking 'any key' listener: {e}")
         finally:
             osd_dismiss_key_handler = None # Ensure it's cleared
+
+# --- Processing Indicator Window Functions ---
+def setup_indicator_window():
+    global indicator_window, osd_root
+    if not osd_root: 
+        print("Indicator Setup Error: OSD root must be initialized first.")
+        return
+
+    indicator_window = tk.Toplevel(osd_root)
+    indicator_window.withdraw() # Start hidden
+    indicator_window.overrideredirect(True)
+    indicator_window.wm_attributes("-topmost", True)
+    indicator_window.attributes('-alpha', 0.4) # Semi-transparent background for the whole window
+
+    screen_width = indicator_window.winfo_screenwidth()
+    screen_height = indicator_window.winfo_screenheight()
+    indicator_window.geometry(f"{screen_width}x{screen_height}+0+0")
+    indicator_window.config(bg="black") # This black will be semi-transparent (due to alpha)
+
+    canvas = tk.Canvas(indicator_window, width=screen_width, height=screen_height,
+                       bg="black", # Match window bg, it will also be semi-transparent
+                       highlightthickness=0)
+    canvas.pack()
+
+    # Draw the frame for the *processed* area
+    canvas.create_rectangle(
+        processing_border_left_right, # Use specific left/right border
+        processing_border_top_bottom, # Use specific top/bottom border
+        screen_width - processing_border_left_right, # Adjust for right border
+        screen_height - processing_border_top_bottom, # Adjust for bottom border
+        outline="lime", 
+        width=3  # Outline width
+    )
+
+    canvas.create_text(
+        screen_width / 2,
+        screen_height / 2,
+        text="Processing...",
+        font=("Arial", 45, "bold"),
+        fill="white" 
+    )
+    print("Indicator Setup: Processing indicator window configured.")
+
+def show_indicator_window_sync():
+    if indicator_window:
+        indicator_window.deiconify()
+        indicator_window.lift()
+        indicator_window.update_idletasks() # Try to force update
+
+def hide_indicator_window_sync():
+    if indicator_window:
+        indicator_window.withdraw()
+        indicator_window.update_idletasks() # Process hide event
 
 # --- Core Image Processing Functions (Re-integrated, no cv2.imshow) ---
 def load_image(image_path):
@@ -426,19 +484,52 @@ def get_distance_string(p1_coords, p2_coords, scale_meters_per_pixel):
 def on_hotkey_pressed():
     """This function is called when the hotkey is detected."""
     print(f"HOTKEY: Ctrl+Shift+Alt+D detected by keyboard library. Timestamp: {time.time():.2f}")
+    
+    # --- Capture Screen FIRST ---
+    print("HOTKEY: Capturing screen...")
+    screen_image = capture_screen() # Capture before showing any overlay
+
+    # --- Now show indicator if capture was successful ---
+    if screen_image is not None and indicator_window:
+        print("HOTKEY: Showing processing indicator.")
+        show_indicator_window_sync()
+    elif screen_image is None:
+        # If capture failed, we might not want to show the indicator,
+        # or we might show it briefly with an error. For now, skip if capture fails.
+        print("HOTKEY: Screen capture failed, skipping indicator display.")
+
     print("HOTKEY: Processing screen analysis...")
     start_time = time.time()
     
     final_osd_message = ""
+    screen_image_to_process = None
 
     # 1. Capture screen
     screen_image = capture_screen()
     if screen_image is None:
         final_osd_message = "Error: Screen capture failed."
     else:
+        # Crop the image for processing
+        h, w = screen_image.shape[:2]
+        roi_x1 = processing_border_left_right
+        roi_y1 = processing_border_top_bottom
+        roi_x2 = w - processing_border_left_right
+        roi_y2 = h - processing_border_top_bottom
+
+        if roi_x1 >= roi_x2 or roi_y1 >= roi_y2:
+            error_detail = f"Screen: {w}x{h}, Borders T/B: {processing_border_top_bottom}, L/R: {processing_border_left_right}"
+            final_osd_message = f"Error: Processing border too large. ({error_detail})"
+            print(f"HOTKEY: Crop Error - {final_osd_message}")
+        else:
+            screen_image_to_process = screen_image[roi_y1:roi_y2, roi_x1:roi_x2]
+            new_dims = screen_image_to_process.shape
+            print(f"HOTKEY: Cropped image for processing from ({roi_x1},{roi_y1})-({roi_x2},{roi_y2}). New dims: {new_dims[:2]}")
+
+    # Proceed with processing only if screen_image_to_process is valid
+    if screen_image_to_process is not None:
         # 2. Calculate scale
         scale = detect_grid_lines_via_local_patterns_and_calculate_scale(
-            screen_image, 
+            screen_image_to_process, 
             BRIGHTNESS_DELTA_GRID, 
             MIN_POINTS_FOR_LINE_GRID
         )
@@ -447,7 +538,7 @@ def on_hotkey_pressed():
         else:
             # 3. Detect Player Icon
             player_coords = detect_object_template_matching(
-                screen_image, 
+                screen_image_to_process, 
                 player_template_cv, 
                 "Player Icon", 
                 TEMPLATE_MATCHING_THRESHOLD_PLAYER
@@ -457,7 +548,7 @@ def on_hotkey_pressed():
             else:
                 # 4. Detect Ping Marker
                 ping_coords = detect_object_template_matching(
-                    screen_image, 
+                    screen_image_to_process, 
                     ping_template_cv, 
                     "Ping Marker", 
                     TEMPLATE_MATCHING_THRESHOLD_PING
@@ -467,10 +558,16 @@ def on_hotkey_pressed():
                 else:
                     # 5. Calculate distance string (Success case)
                     final_osd_message = get_distance_string(player_coords, ping_coords, scale)
-    
+    elif not final_osd_message: # If capture was ok but crop failed and no message set yet
+        final_osd_message = "Error: Image cropping failed."
+            
     end_time = time.time()
     processing_time = end_time - start_time
     print(f"HOTKEY: Analysis function complete ({processing_time:.2f}s). Message: '{final_osd_message}'. Scheduling OSD update.")
+
+    if indicator_window:
+        print("HOTKEY: Hiding processing indicator.")
+        hide_indicator_window_sync()
 
     # Schedule OSD update with the final message (either success or error)
     if osd_root:
@@ -522,6 +619,12 @@ if __name__ == "__main__":
 
     print("Application running. Press Ctrl+C in console to quit.")
     try:
+        # Initialize and setup the indicator window
+        if osd_root: # Ensure OSD is up before indicator that might be Toplevel of it
+             print("MAIN: Setting up processing indicator window...")
+             setup_indicator_window()
+             print("MAIN: Processing indicator window setup complete.")
+        
         osd_root.mainloop()
     except KeyboardInterrupt:
         print("\nCtrl+C detected. Shutting down...")
@@ -534,6 +637,11 @@ if __name__ == "__main__":
         print("MAIN: Keyboard events unhooked.")
         if osd_root:
             print("MAIN: Destroying OSD window...")
-            osd_root.destroy()
+            osd_root.destroy() # This should also destroy child Toplevels like indicator_window
             print("MAIN: OSD window destroyed.")
+        # Explicitly destroy indicator window if it's not a child or for safety
+        if indicator_window and indicator_window.winfo_exists():
+             print("MAIN: Explicitly destroying indicator window...")
+             indicator_window.destroy()
+             print("MAIN: Indicator window destroyed.")
         print("Shutdown complete.")
